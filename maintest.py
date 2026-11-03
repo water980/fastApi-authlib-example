@@ -3,8 +3,14 @@ import importlib
 from authlib.common.security import generate_token
 from authlib.oauth2.rfc6749 import AuthorizationCodeGrant
 from authlib.oauth2.rfc6750 import BearerTokenGenerator
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from pydantic import BaseModel
+from authlib.integrations.fastapi_oauth2.resource_protector import (
+    ResourceProtector,
+)
+from time import time
+
+from authlib.oauth2.rfc6750 import BearerTokenValidator
 
 from authlib.authlib.integrations.fastapi_oauth2.authorization_server import (
     AuthorizationServer,
@@ -180,6 +186,41 @@ class MyAuthorizationCodeGrant(AuthorizationCodeGrant):
 server.register_grant(MyAuthorizationCodeGrant)
 
 
+
+
+class MyBearerTokenValidator(BearerTokenValidator):
+    def authenticate_token(self, token_string):
+        token_data = TOKENS_DB.get(token_string)
+
+        if not token_data:
+            return None
+
+        class Token:
+            def __init__(self, data):
+                self.access_token = data["access_token"]
+                self.client_id = data["client_id"]
+                self.user_id = data["user_id"]
+                self.scope = data.get("scope", "")
+                self.expires_at = data.get("expires_at")
+                self.revoked = data.get("revoked", False)
+
+            def get_scope(self):
+                return self.scope
+
+            def is_expired(self):
+                return self.expires_at is not None and self.expires_at < time()
+
+            def is_revoked(self):
+                return self.revoked
+
+        return Token(token_data)
+
+
+
+require_oauth = ResourceProtector()
+require_oauth.register_token_validator(MyBearerTokenValidator())
+
+
 @app.get("/oauth/authorize")
 async def authorize(request: Request):
     class MockUser:
@@ -187,11 +228,16 @@ async def authorize(request: Request):
         username = "admin"
 
     grant_user = MockUser()
-    # Сервер сам асинхронно перепарсить request та поверне Response
     return await server.create_authorization_response(request, grant_user=grant_user)
 
 
 @app.post("/oauth/token")
 async def issue_token(request: Request):
-    # Сервер сам визначить тип запиту (form-urlencoded або json) та випустить токен
     return await server.create_token_response(request)
+
+
+@app.get("/user")
+async def get_user(token=Depends(require_oauth(["profile"]))):
+    return {
+        "user_id": token.user_id,
+    }
